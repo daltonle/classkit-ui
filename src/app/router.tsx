@@ -11,10 +11,10 @@ import { ArrangementsPage } from "@/routes/arrangements";
 import { ClassOverviewPage } from "@/routes/class-overview";
 import { ClassesPage } from "@/routes/classes";
 import { HomePage } from "@/routes/home";
-import { GoogleDriveSpikePage } from "@/routes/google-drive-spike";
 import { NewClassPage } from "@/routes/new-class";
 import { NotFoundPage } from "@/routes/not-found";
 import { StudentsPage } from "@/routes/students";
+import { SettingsDataBackupsPage } from "@/routes/settings-data-backups";
 
 const rootRoute = createRootRoute({
   component: App,
@@ -27,11 +27,16 @@ const indexRoute = createRoute({
   component: HomePage,
 });
 
-const googleDriveSpikeRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/drive-spike",
-  component: GoogleDriveSpikePage,
-});
+const googleDriveSpikeRoute = import.meta.env.DEV
+  ? createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/drive-spike",
+      component: lazyRouteComponent(
+        () => import("@/routes/google-drive-spike"),
+        "GoogleDriveSpikePage",
+      ),
+    })
+  : undefined;
 
 const classesRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -72,15 +77,22 @@ const seatingEditorRoute = createRoute({
   ),
 });
 
+const settingsDataBackupsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/data-backups",
+  component: SettingsDataBackupsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  googleDriveSpikeRoute,
+  ...(googleDriveSpikeRoute ? [googleDriveSpikeRoute] : []),
   classesRoute,
   newClassRoute,
   classOverviewRoute,
   studentsRoute,
   arrangementsRoute,
   seatingEditorRoute,
+  settingsDataBackupsRoute,
 ]);
 
 export function createAppRouter(history?: RouterHistory) {

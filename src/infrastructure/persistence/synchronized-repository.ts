@@ -1,7 +1,8 @@
 import Dexie, { type EntityTable } from "dexie";
+import { z } from "zod";
 
 import type { Classroom } from "@/domain/classroom/classroom.schema";
-import type { ClasskitManifestV1 } from "@/domain/documents/document.schema";
+import { classroomSchema } from "@/domain/classroom/classroom.schema";
 import type {
   ClasskitRepository,
   ClassSummary,
@@ -14,38 +15,76 @@ import { PersistenceError } from "./persistence-errors";
 export type SyncStatus =
   "saved" | "saving" | "offline" | "reconnect_required" | "conflict" | "error";
 
-type SyncRecord = {
-  id: string;
-  dirty: boolean;
-  localUpdatedAt: string;
+const cloudSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  createdAt: z.iso.datetime({ offset: true }),
+  data: z.object({
+    classes: z.array(classroomSchema),
+    avatars: z.array(
+      z.object({
+        id: z.uuid(),
+        mimeType: z.literal("image/webp"),
+        base64: z.string().min(1),
+      }),
+    ),
+  }),
+});
+
+type CloudSnapshot = z.infer<typeof cloudSnapshotSchema>;
+type SyncMetadata = {
+  id: "cloud";
   remoteFileId?: string;
   remoteVersion?: string;
-  deleted?: boolean;
-  avatarFileIds: Record<string, string>;
+  lastSyncedAt?: string;
+  dirty: boolean;
+  backupDeleted?: boolean;
 };
-type ManifestRecord = { id: "manifest"; fileId?: string; version?: string };
 
 class SyncDatabase extends Dexie {
-  records!: EntityTable<SyncRecord, "id">;
-  manifest!: EntityTable<ManifestRecord, "id">;
+  // The first version preserves existing per-record metadata while migration runs.
+  records!: EntityTable<{ id: string }, "id">;
+  manifest!: EntityTable<{ id: string }, "id">;
+  metadata!: EntityTable<SyncMetadata, "id">;
+
   constructor() {
     super("classkit-sync");
     this.version(1).stores({
       records: "id, dirty, localUpdatedAt",
       manifest: "id",
     });
+    this.version(2).stores({
+      records: "id, dirty, localUpdatedAt",
+      manifest: "id",
+      metadata: "id, dirty",
+    });
   }
 }
 
-const retryDelay = (attempt: number) =>
-  500 * 2 ** attempt + Math.random() * 250;
+const debounceMs = 2_000;
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return blob.arrayBuffer().then((buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let start = 0; start < bytes.length; start += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+    }
+    return btoa(binary);
+  });
+}
+
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new Blob([bytes], { type: mimeType });
+}
 
 export class SynchronizedRepository implements ClasskitRepository {
   private readonly database = new SyncDatabase();
-  private readonly timers = new Map<string, number>();
-  private readonly inFlight = new Map<string, Promise<void>>();
   private readonly listeners = new Set<(status: SyncStatus) => void>();
   private status: SyncStatus = navigator.onLine ? "saved" : "offline";
+  private syncTimer?: number;
+  private inFlight?: Promise<void>;
   private readonly channel = new BroadcastChannel("classkit-sync");
 
   constructor(
@@ -54,10 +93,11 @@ export class SynchronizedRepository implements ClasskitRepository {
   ) {
     window.addEventListener("online", () => void this.syncNow());
     window.addEventListener("offline", () => this.setStatus("offline"));
-    this.channel.onmessage = (
-      event: MessageEvent<{ type: string; classId?: string }>,
-    ) => {
-      if (event.data.type === "synced") void this.syncNow();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void this.syncNow();
+    });
+    this.channel.onmessage = (event: MessageEvent<{ type: string }>) => {
+      if (event.data.type === "snapshot-synced") void this.syncNow();
     };
   }
 
@@ -81,27 +121,19 @@ export class SynchronizedRepository implements ClasskitRepository {
   }
   async createClass(classroom: Classroom): Promise<void> {
     await this.local.createClass(classroom);
-    await this.markDirty(classroom.id, classroom.updatedAt);
+    await this.markDirty();
   }
   async saveClass(
     classroom: Classroom,
     options?: SaveOptions,
   ): Promise<SaveResult> {
     const result = await this.local.saveClass(classroom, options);
-    await this.markDirty(classroom.id, result.updatedAt);
+    await this.markDirty();
     return result;
   }
   async deleteClass(classId: string): Promise<void> {
     await this.local.deleteClass(classId);
-    const current = await this.database.records.get(classId);
-    if (!current) return;
-    await this.database.records.put({
-      ...current,
-      dirty: true,
-      deleted: true,
-      localUpdatedAt: new Date().toISOString(),
-    });
-    this.schedule(classId);
+    await this.markDirty();
   }
   async getAvatar(
     avatarId: string,
@@ -111,48 +143,97 @@ export class SynchronizedRepository implements ClasskitRepository {
   }
   async saveAvatar(avatarId: string, image: Blob): Promise<void> {
     await this.local.saveAvatar(avatarId, image);
-    const classes = await this.local.listClasses();
-    for (const summary of classes) {
-      const classroom = await this.local.getClass(summary.id);
-      if (
-        classroom.students.some((student) => student.avatar?.id === avatarId)
-      ) {
-        await this.markDirty(classroom.id, classroom.updatedAt);
-        return;
-      }
-    }
+    await this.markDirty();
   }
   async deleteAvatar(avatarId: string): Promise<void> {
     await this.local.deleteAvatar(avatarId);
+    await this.markDirty();
   }
 
-  private async markDirty(classId: string, localUpdatedAt: string) {
-    const current = await this.database.records.get(classId);
-    await this.database.records.put({
-      id: classId,
-      dirty: true,
-      localUpdatedAt,
-      remoteFileId: current?.remoteFileId,
-      remoteVersion: current?.remoteVersion,
-      avatarFileIds: current?.avatarFileIds ?? {},
+  async deleteDriveBackups(): Promise<number> {
+    const files = await this.remote.listAppDataFiles();
+    await Promise.all(files.map(({ id }) => this.remote.delete(id)));
+    await this.database.metadata.put({
+      id: "cloud",
+      dirty: false,
+      backupDeleted: true,
+      lastSyncedAt: new Date().toISOString(),
     });
-    this.schedule(classId);
+    this.setStatus("saved");
+    return files.length;
   }
 
-  private schedule(classId: string, delay = 1_500) {
-    const existing = this.timers.get(classId);
-    if (existing) window.clearTimeout(existing);
-    this.timers.set(
-      classId,
-      window.setTimeout(() => void this.syncClass(classId), delay),
-    );
+  private async markDirty() {
+    const previous = await this.database.metadata.get("cloud");
+    await this.database.metadata.put({
+      id: "cloud",
+      dirty: true,
+      remoteFileId: previous?.remoteFileId,
+      remoteVersion: previous?.remoteVersion,
+      lastSyncedAt: previous?.lastSyncedAt,
+      backupDeleted: false,
+    });
+    this.scheduleSync();
   }
 
-  async syncNow(): Promise<void> {
+  private scheduleSync() {
+    if (this.syncTimer) window.clearTimeout(this.syncTimer);
+    this.syncTimer = window.setTimeout(() => void this.syncNow(), debounceMs);
+  }
+
+  syncNow(): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    const task = this.syncSnapshot().finally(() => {
+      this.inFlight = undefined;
+    });
+    this.inFlight = task;
+    return task;
+  }
+
+  private async syncSnapshot(): Promise<void> {
     if (!navigator.onLine) return this.setStatus("offline");
     this.setStatus("saving");
     try {
-      await this.hydrateFromDrive();
+      const metadata = await this.database.metadata.get("cloud");
+      const localSnapshot = await this.exportSnapshot();
+      const remote = await this.remote.getCloudSnapshot();
+
+      if (!remote) {
+        if (
+          !metadata?.dirty &&
+          (metadata?.backupDeleted || !localSnapshot.data.classes.length)
+        ) {
+          this.setStatus("saved");
+          return;
+        }
+        await this.uploadSnapshot(localSnapshot, metadata);
+        return;
+      }
+
+      const remoteChanged = remote.file.version !== metadata?.remoteVersion;
+      if (!remoteChanged) {
+        if (metadata?.dirty) await this.uploadSnapshot(localSnapshot, metadata);
+        else this.setStatus("saved");
+        return;
+      }
+
+      const remoteSnapshot = cloudSnapshotSchema.parse(remote.raw);
+      if (metadata?.dirty) {
+        const merged = this.mergeSnapshots(localSnapshot, remoteSnapshot);
+        await this.importSnapshot(merged);
+        await this.uploadSnapshot(merged, {
+          ...metadata,
+          remoteFileId: remote.file.id,
+        });
+      } else {
+        await this.importSnapshot(remoteSnapshot);
+        await this.saveMetadata({
+          dirty: false,
+          remoteFileId: remote.file.id,
+          remoteVersion: remote.file.version,
+        });
+        this.setStatus("saved");
+      }
     } catch (error) {
       const persistence = error instanceof PersistenceError ? error : undefined;
       if (persistence?.code === "unauthorized") {
@@ -164,207 +245,101 @@ export class SynchronizedRepository implements ClasskitRepository {
         return;
       }
       this.setStatus("error");
-      return;
-    }
-    await this.queueUnsyncedLocalClasses();
-    const records = await this.database.records
-      .where("dirty")
-      .equals(1)
-      .toArray();
-    if (!records.length) return this.setStatus("saved");
-    await Promise.all(records.map(({ id }) => this.syncClass(id)));
-  }
-
-  private syncClass(classId: string, attempt = 0): Promise<void> {
-    const existing = this.inFlight.get(classId);
-    if (existing) return existing;
-    const task = this.syncClassUnlocked(classId, attempt).finally(() => {
-      this.inFlight.delete(classId);
-    });
-    this.inFlight.set(classId, task);
-    return task;
-  }
-
-  private async syncClassUnlocked(classId: string, attempt = 0): Promise<void> {
-    const record = await this.database.records.get(classId);
-    if (!record?.dirty) return;
-    if (!navigator.onLine) return this.setStatus("offline");
-    this.setStatus("saving");
-    try {
-      if (record.deleted) {
-        await this.syncDeletion(record);
-        this.setStatus("saved");
-        return;
-      }
-      const classroom = await this.local.getClass(classId);
-      if (record.remoteFileId && record.remoteVersion) {
-        const remoteMetadata = await this.remote.getFile(record.remoteFileId);
-        if (remoteMetadata.version !== record.remoteVersion)
-          throw new PersistenceError(
-            "conflict",
-            "This class changed in another tab. Your local version has been preserved.",
-          );
-      }
-      const remoteFile = await this.remote.saveClass(
-        classroom,
-        record.remoteFileId,
-      );
-      await this.syncAvatars(classroom, record);
-      const recordWithRemote = {
-        ...((await this.database.records.get(classId)) ?? record),
-        remoteFileId: remoteFile.id,
-        remoteVersion: remoteFile.version,
-      };
-      await this.database.records.put(recordWithRemote);
-      const manifestState = await this.database.manifest.get("manifest");
-      const manifest = await this.buildManifest(manifestState?.fileId);
-      const manifestFile = await this.remote.saveManifest(
-        manifest,
-        manifestState?.fileId,
-      );
-      await this.database.manifest.put({
-        id: "manifest",
-        fileId: manifestFile.id,
-        version: manifestFile.version,
-      });
-      const latest = await this.database.records.get(classId);
-      if (latest?.localUpdatedAt === record.localUpdatedAt) {
-        await this.database.records.put({
-          ...latest,
-          dirty: false,
-          remoteFileId: remoteFile.id,
-          remoteVersion: remoteFile.version,
-        });
-      }
-      this.channel.postMessage({ type: "synced", classId });
-      this.setStatus("saved");
-    } catch (error) {
-      const persistence = error instanceof PersistenceError ? error : undefined;
-      if (persistence?.code === "unauthorized")
-        return this.setStatus("reconnect_required");
-      if (persistence?.code === "offline") return this.setStatus("offline");
-      if (persistence?.code === "conflict") return this.setStatus("conflict");
-      if (persistence?.code === "rate_limited" && attempt < 3) {
-        this.schedule(classId, retryDelay(attempt));
-        return;
-      }
-      this.setStatus("error");
     }
   }
 
-  private async hydrateFromDrive() {
-    const remote = await this.remote.getManifest();
-    if (!remote) return;
-    await this.database.manifest.put({
-      id: "manifest",
-      fileId: remote.file.id,
-      version: remote.file.version,
+  private async uploadSnapshot(
+    snapshot: CloudSnapshot,
+    metadata?: SyncMetadata,
+  ) {
+    const uploaded = await this.remote.saveCloudSnapshot(
+      snapshot,
+      metadata?.remoteFileId,
+    );
+    const file = await this.remote.getFile(uploaded.id);
+    await this.saveMetadata({
+      dirty: false,
+      remoteFileId: file.id,
+      remoteVersion: file.version,
+      backupDeleted: false,
     });
-    for (const entry of remote.manifest.classes) {
-      const record = await this.database.records.get(entry.id);
-      if (record?.dirty) continue;
-      let local: Classroom | undefined;
+    this.channel.postMessage({ type: "snapshot-synced" });
+    this.setStatus("saved");
+  }
+
+  private async exportSnapshot(): Promise<CloudSnapshot> {
+    const summaries = await this.local.listClasses();
+    const classes = await Promise.all(
+      summaries.map(({ id }) => this.local.getClass(id)),
+    );
+    const avatarIds = new Set(
+      classes.flatMap((classroom) =>
+        classroom.students.flatMap((student) =>
+          student.avatar ? [student.avatar.id] : [],
+        ),
+      ),
+    );
+    const avatars = await Promise.all(
+      [...avatarIds].map(async (id) => {
+        const image = await this.local.getAvatar(id);
+        if (!image) return undefined;
+        return {
+          id,
+          mimeType: "image/webp" as const,
+          base64: await blobToBase64(image),
+        };
+      }),
+    );
+    return cloudSnapshotSchema.parse({
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      data: { classes, avatars: avatars.filter(Boolean) },
+    });
+  }
+
+  private async importSnapshot(snapshot: CloudSnapshot) {
+    for (const classroom of snapshot.data.classes) {
       try {
-        local = await this.local.getClass(entry.id);
+        await this.local.saveClass(classroom);
       } catch (error) {
         if (!(error instanceof PersistenceError) || error.code !== "not_found")
           throw error;
+        await this.local.createClass(classroom);
       }
-      if (local && local.updatedAt >= entry.updatedAt) {
-        const remoteFile = await this.remote.getFile(entry.documentFileId);
-        await this.database.records.put({
-          id: entry.id,
-          dirty: false,
-          localUpdatedAt: local.updatedAt,
-          remoteFileId: entry.documentFileId,
-          remoteVersion: remoteFile.version,
-          avatarFileIds: record?.avatarFileIds ?? {},
-        });
-        continue;
-      }
-      const downloaded = await this.remote.loadClass(entry.documentFileId);
-      if (local) await this.local.saveClass(downloaded);
-      else await this.local.createClass(downloaded);
-      const remoteFile = await this.remote.getFile(entry.documentFileId);
-      await this.database.records.put({
-        id: entry.id,
-        dirty: false,
-        localUpdatedAt: downloaded.updatedAt,
-        remoteFileId: entry.documentFileId,
-        remoteVersion: remoteFile.version,
-        avatarFileIds: record?.avatarFileIds ?? {},
-      });
     }
-  }
-
-  private async queueUnsyncedLocalClasses() {
-    const summaries = await this.local.listClasses();
-    for (const summary of summaries) {
-      const record = await this.database.records.get(summary.id);
-      if (!record) await this.markDirty(summary.id, summary.updatedAt);
-    }
-  }
-
-  private async syncDeletion(record: SyncRecord) {
-    if (record.remoteFileId) await this.remote.delete(record.remoteFileId);
-    const manifestState = await this.database.manifest.get("manifest");
-    const remote = await this.remote.getManifest();
-    if (remote) {
-      await this.remote.saveManifest(
-        {
-          ...remote.manifest,
-          classes: remote.manifest.classes.filter(({ id }) => id !== record.id),
-          updatedAt: new Date().toISOString(),
-        },
-        manifestState?.fileId ?? remote.file.id,
-      );
-    }
-    await this.database.records.delete(record.id);
-    this.channel.postMessage({ type: "synced", classId: record.id });
-  }
-
-  private async syncAvatars(classroom: Classroom, record: SyncRecord) {
-    const avatarFileIds = { ...record.avatarFileIds };
-    for (const student of classroom.students) {
-      if (!student.avatar || avatarFileIds[student.avatar.id]) continue;
-      const image = await this.local.getAvatar(student.avatar.id);
-      if (!image) continue;
-      const file = await this.remote.saveAvatar(student.avatar.id, image);
-      avatarFileIds[student.avatar.id] = file.id;
-    }
-    const current = await this.database.records.get(record.id);
-    if (current) await this.database.records.put({ ...current, avatarFileIds });
-  }
-
-  private async buildManifest(fileId?: string): Promise<ClasskitManifestV1> {
-    const remote = fileId
-      ? await this.remote.getManifest().catch(() => undefined)
-      : undefined;
-    const records = await this.database.records.toArray();
-    const classes = await Promise.all(
-      records.map(async (record) => {
-        const classroom = await this.local.getClass(record.id);
-        return record.remoteFileId
-          ? {
-              id: classroom.id,
-              name: classroom.name,
-              documentFileId: record.remoteFileId,
-              updatedAt: classroom.updatedAt,
-            }
-          : undefined;
-      }),
+    await Promise.all(
+      snapshot.data.avatars.map(({ id, mimeType, base64 }) =>
+        this.local.saveAvatar(id, base64ToBlob(base64, mimeType)),
+      ),
     );
-    const localEntries = classes.filter(
-      (entry): entry is NonNullable<typeof entry> => Boolean(entry),
-    );
-    const byId = new Map(
-      remote?.manifest.classes.map((entry) => [entry.id, entry]) ?? [],
-    );
-    localEntries.forEach((entry) => byId.set(entry.id, entry));
-    return {
+  }
+
+  private mergeSnapshots(
+    local: CloudSnapshot,
+    remote: CloudSnapshot,
+  ): CloudSnapshot {
+    const classes = new Map(remote.data.classes.map((item) => [item.id, item]));
+    for (const classroom of local.data.classes) {
+      const remoteClassroom = classes.get(classroom.id);
+      if (!remoteClassroom || classroom.updatedAt >= remoteClassroom.updatedAt)
+        classes.set(classroom.id, classroom);
+    }
+    const avatars = new Map(remote.data.avatars.map((item) => [item.id, item]));
+    local.data.avatars.forEach((avatar) => avatars.set(avatar.id, avatar));
+    return cloudSnapshotSchema.parse({
       schemaVersion: 1,
-      classes: [...byId.values()],
-      updatedAt: new Date().toISOString(),
-    };
+      createdAt: new Date().toISOString(),
+      data: { classes: [...classes.values()], avatars: [...avatars.values()] },
+    });
+  }
+
+  private async saveMetadata(
+    metadata: Omit<SyncMetadata, "id" | "lastSyncedAt">,
+  ) {
+    await this.database.metadata.put({
+      id: "cloud",
+      ...metadata,
+      lastSyncedAt: new Date().toISOString(),
+    });
   }
 }

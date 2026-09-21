@@ -10,6 +10,7 @@ import { PersistenceError } from "./persistence-errors";
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 const MANIFEST_NAME = "classkit-manifest.json";
+export const CLOUD_SNAPSHOT_NAME = "classkit.json";
 
 export type DriveFile = { id: string; name: string; version: string };
 
@@ -93,6 +94,19 @@ export class GoogleDriveRepository {
     return data.files?.[0];
   }
 
+  async listAppDataFiles(): Promise<DriveFile[]> {
+    const query = new URLSearchParams({
+      q: "trashed = false",
+      spaces: "appDataFolder",
+      fields: "files(id,name,version)",
+      pageSize: "100",
+    });
+    const data = (await (
+      await this.request(`${DRIVE_API}/files?${query}`)
+    ).json()) as { files?: DriveFile[] };
+    return data.files ?? [];
+  }
+
   async getFile(fileId: string): Promise<DriveFile> {
     return (await (
       await this.request(`${DRIVE_API}/files/${fileId}?fields=id,name,version`)
@@ -155,6 +169,26 @@ export class GoogleDriveRepository {
       await (await this.download(file.id)).text(),
     );
     return { file, manifest: classkitManifestV1Schema.parse(raw) };
+  }
+
+  async getCloudSnapshot(): Promise<
+    { file: DriveFile; raw: unknown } | undefined
+  > {
+    const file = await this.findByName(CLOUD_SNAPSHOT_NAME);
+    if (!file) return undefined;
+    const raw: unknown = JSON.parse(
+      await (await this.download(file.id)).text(),
+    );
+    return { file, raw };
+  }
+
+  async saveCloudSnapshot(data: unknown, fileId?: string): Promise<DriveFile> {
+    return this.upload(
+      CLOUD_SNAPSHOT_NAME,
+      new Blob([JSON.stringify(data)], { type: "application/json" }),
+      "application/json",
+      fileId,
+    );
   }
 
   async saveManifest(

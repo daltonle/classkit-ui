@@ -275,43 +275,29 @@ Use domain functions such as `createClassroom`, `duplicateArrangement`, `placeSt
 
 Use JSON for canonical structured data. CSV may later be offered only as an import/export format.
 
-Files in Google Drive `appDataFolder`:
+Google Drive `appDataFolder` contains one portable, versioned snapshot:
 
 ```text
-classkit-manifest.json
-class-{classId}.json
-avatar-{avatarId}.webp
+classkit.json
 ```
 
-The manifest is lightweight:
+The snapshot keeps metadata separate from its application data:
 
 ```ts
-type ClasskitManifestV1 = {
+type CloudSnapshotV1 = {
   schemaVersion: 1;
-  classes: Array<{
-    id: string;
-    name: string;
-    documentFileId: string;
-    updatedAt: string;
-  }>;
-  updatedAt: string;
-};
-```
-
-Each class document uses an envelope:
-
-```ts
-type ClassroomDocumentV1 = {
-  schemaVersion: 1;
-  documentType: "classroom";
-  data: Classroom;
+  createdAt: string;
+  data: {
+    classes: Classroom[];
+    avatars: Array<{ id: string; mimeType: "image/webp"; base64: string }>;
+  };
 };
 ```
 
 Rules:
 
 - Store and retain Drive file IDs after creation; do not rely only on filenames.
-- Store avatar files separately so routine layout edits do not re-upload images.
+- Treat the snapshot as a portable database backup, not as IndexedDB serialization.
 - Never persist access tokens.
 - Never persist raw Konva node JSON.
 - Validate every downloaded document.
@@ -399,19 +385,19 @@ type AuthState =
 
 1. Apply an editor command to in-memory state.
 2. Save the resulting class document to IndexedDB immediately.
-3. Mark that class as dirty in IndexedDB.
-4. Debounce remote synchronization for approximately 1–2 seconds.
-5. Upload the latest complete class document to Drive.
-6. On success, record the remote revision and clear dirty state if no newer local edit exists.
+3. Mark the cloud snapshot as dirty in IndexedDB.
+4. Debounce remote synchronization for approximately two seconds.
+5. Compare the remote snapshot version with the last known version.
+6. Upload, download, merge, or do nothing as appropriate; then record the remote version.
 
 Coalesce repeated edits. Do not enqueue one Drive request for every pointer movement.
 
 ### Read path
 
 1. Render locally cached class summaries immediately when available.
-2. Fetch the remote manifest and relevant class document when authorized and online.
-3. Validate and migrate the remote document.
-4. Reconcile it with local dirty state.
+2. Fetch remote file metadata first; download the snapshot only when its version changed.
+3. Validate and migrate the remote snapshot.
+4. Reconcile it with local dirty state using record-level `updatedAt` values.
 5. Update IndexedDB and the query cache.
 
 ### Sync status
@@ -729,9 +715,9 @@ Acceptance criteria:
 ### Milestone 6: synchronized persistence
 
 - Implement Google Drive repository.
-- Implement manifest lifecycle.
-- Implement synchronized repository, dirty records, status, debounce, retries, and reconnect.
-- Add tab coordination and optimistic conflict detection.
+- Implement versioned cloud-snapshot lifecycle.
+- Implement synchronized repository, global dirty metadata, status, debounce, merge, and reconnect.
+- Add tab coordination and deterministic last-write-wins merging.
 - Replace local-only screen wiring with synchronized persistence.
 
 Acceptance criteria:
