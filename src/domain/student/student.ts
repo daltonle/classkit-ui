@@ -11,7 +11,7 @@ const AVATAR_COLORS = [
 
 export type StudentDetails = {
   firstName: string;
-  lastName: string;
+  lastName?: string;
   note?: string;
 };
 
@@ -33,7 +33,8 @@ export function createStudent(
   return studentSchema.parse({
     id,
     firstName: details.firstName,
-    lastName: details.lastName,
+    lastName: details.lastName ?? "",
+    points: 0,
     ...(details.note?.trim() ? { note: details.note } : {}),
     avatarColor: avatarColorForId(id),
     createdAt: timestamp,
@@ -49,7 +50,7 @@ export function updateStudent(
   return studentSchema.parse({
     ...student,
     firstName: details.firstName,
-    lastName: details.lastName,
+    lastName: details.lastName ?? "",
     note: details.note?.trim() || undefined,
     updatedAt: now.toISOString(),
   });
@@ -57,6 +58,24 @@ export function updateStudent(
 
 export function studentInitials(student: Student): string {
   return `${student.firstName.at(0) ?? ""}${student.lastName.at(0) ?? ""}`.toUpperCase();
+}
+
+export function studentFullName(student: Student): string {
+  return [student.firstName, student.lastName].filter(Boolean).join(" ");
+}
+
+export function adjustStudentPoints(
+  student: Student,
+  change: number,
+  now = new Date(),
+): Student {
+  if (!Number.isInteger(change))
+    throw new Error("Student point changes must be whole numbers.");
+  return studentSchema.parse({
+    ...student,
+    points: student.points + change,
+    updatedAt: now.toISOString(),
+  });
 }
 
 export function compareStudents(left: Student, right: Student): number {

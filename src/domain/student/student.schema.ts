@@ -5,7 +5,8 @@ const timestampSchema = z.iso.datetime({ offset: true });
 export const studentSchema = z.object({
   id: z.uuid(),
   firstName: z.string().trim().min(1, "First name is required"),
-  lastName: z.string().trim().min(1, "Last name is required"),
+  lastName: z.string().trim().default(""),
+  points: z.number().int().default(0),
   note: z.string().trim().optional(),
   avatar: z
     .object({

@@ -10,7 +10,7 @@ import { FormField } from "@/shared/components/form-field";
 
 const studentFormSchema = z.object({
   firstName: z.string().trim().min(1, "Enter a first name"),
-  lastName: z.string().trim().min(1, "Enter a last name"),
+  lastName: z.string().trim(),
   note: z.string(),
 });
 
@@ -62,7 +62,7 @@ export function StudentForm({
         />
         <FormField
           id="student-last-name"
-          label="Last name"
+          label="Last name (optional)"
           error={errors.lastName?.message}
           {...register("lastName")}
         />

@@ -8,7 +8,7 @@ The first feature is a visual classroom seating-arrangement editor. A teacher ca
 
 - sign in with a Google account;
 - create and manage multiple classes;
-- add student records with first name, last name, optional note, and optional avatar;
+- add student records with first name, optional last name, optional note, optional avatar, and points;
 - construct a classroom map using movable rectangle, circle, and text objects;
 - place student avatars freely on the map;
 - save multiple arrangements for a class;
@@ -191,7 +191,8 @@ type Classroom = {
 type Student = {
   id: string;
   firstName: string;
-  lastName: string;
+  lastName: string; // optional in input; persisted as "" when omitted
+  points: number;
   note?: string;
   avatar?: {
     id: string;
@@ -259,7 +260,8 @@ type StudentPlacement = {
 Enforce these invariants in domain functions and schemas:
 
 - A class name is required after trimming.
-- First name and last name are required after trimming.
+- First name is required after trimming; last name is optional.
+- Student points are whole numbers and start at zero.
 - Arrangement names are required and unique within a class, compared case-insensitively.
 - A student may occur at most once in a given arrangement.
 - Every placement must refer to an existing student.
@@ -482,10 +484,11 @@ Route access should be guarded by auth state. Avoid redirect loops while auth is
 
 ### Student roster
 
-- List students alphabetically by last name then first name.
+- List students alphabetically by last name then first name, treating an omitted last name as empty.
 - Add and edit student using a dialog or dedicated panel.
 - Search by first or last name.
 - Display avatar, full name, and a subtle indication when a note exists.
+- Display current points and provide accessible −1 and +1 quick actions for each student.
 - Do not display full notes in the list.
 - Deletion is blocked while a student appears in any arrangement.
 - A blocked-deletion dialog states the number of arrangements and links to them.

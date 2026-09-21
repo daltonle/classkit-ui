@@ -3,7 +3,9 @@ import { Link, useParams } from "@tanstack/react-router";
 import {
   ArrowLeft,
   FileText,
+  Minus,
   Pencil,
+  PlusCircle,
   Plus,
   Search,
   Trash2,
@@ -21,6 +23,8 @@ import {
 import {
   compareStudents,
   createStudent,
+  adjustStudentPoints,
+  studentFullName,
   updateStudent,
 } from "@/domain/student/student";
 import type { Student } from "@/domain/student/student.schema";
@@ -111,11 +115,7 @@ export function StudentsPage() {
       setBlockedStudentId(student.id);
       return;
     }
-    if (
-      !window.confirm(
-        `Permanently delete ${student.firstName} ${student.lastName}?`,
-      )
-    )
+    if (!window.confirm(`Permanently delete ${studentFullName(student)}?`))
       return;
 
     try {
@@ -128,6 +128,25 @@ export function StudentsPage() {
         error instanceof Error
           ? error.message
           : "The student could not be deleted.",
+      );
+    }
+  }
+
+  async function changePoints(student: Student, change: number) {
+    if (!classroomQuery.data) return;
+    try {
+      await persistClassroom(
+        replaceStudent(
+          classroomQuery.data,
+          adjustStudentPoints(student, change),
+        ),
+      );
+      setActionError(undefined);
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "The student's points could not be updated.",
       );
     }
   }
@@ -168,7 +187,7 @@ export function StudentsPage() {
       <PageHeader
         eyebrow={classroom.name}
         title="Student roster"
-        description="Names are sorted by last name. Student data is saved locally on this device."
+        description="Names are sorted by last name when available. Student data is saved locally on this device."
         actions={
           <Button onClick={() => setFormMode({ type: "add" })}>
             <Plus aria-hidden="true" className="size-4" /> Add student
@@ -275,7 +294,7 @@ export function StudentsPage() {
                 <StudentAvatar student={student} />
                 <div className="min-w-0 flex-1">
                   <p className="font-medium text-slate-950">
-                    {student.firstName} {student.lastName}
+                    {studentFullName(student)}
                   </p>
                   {student.note ? (
                     <p className="mt-1 flex items-center gap-1 text-xs text-slate-500">
@@ -284,7 +303,33 @@ export function StudentsPage() {
                     </p>
                   ) : null}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center rounded-md border border-slate-200 bg-slate-50">
+                    <Button
+                      aria-label={`Remove one point from ${studentFullName(student)}`}
+                      className="rounded-r-none"
+                      onClick={() => void changePoints(student, -1)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      <Minus aria-hidden="true" className="size-3.5" />
+                    </Button>
+                    <output
+                      aria-label={`${studentFullName(student)} has ${student.points} points`}
+                      className="min-w-10 px-2 text-center text-sm font-semibold tabular-nums"
+                    >
+                      {student.points}
+                    </output>
+                    <Button
+                      aria-label={`Add one point to ${studentFullName(student)}`}
+                      className="rounded-l-none"
+                      onClick={() => void changePoints(student, 1)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      <PlusCircle aria-hidden="true" className="size-3.5" />
+                    </Button>
+                  </div>
                   <Button
                     size="sm"
                     variant="outline"
