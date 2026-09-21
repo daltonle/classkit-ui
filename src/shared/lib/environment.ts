@@ -17,3 +17,5 @@ export function parseEnvironment(values: unknown): Environment {
 
   return result.data;
 }
+
+export const environment = parseEnvironment(import.meta.env);

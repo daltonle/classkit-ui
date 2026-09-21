@@ -180,7 +180,7 @@ type Classroom = {
   id: string;
   name: string;
   schoolYear?: string;
-  grade?: string;
+  grade?: number;
   students: Student[];
   arrangements: SeatingArrangement[];
   activeArrangementId?: string;
@@ -488,7 +488,7 @@ Route access should be guarded by auth state. Avoid redirect loops while auth is
 
 ### Class overview
 
-- Class name, optional school year, and optional grade/year level.
+- Class name, optional school year, and optional numeric grade/year level.
 - Student count.
 - Active arrangement summary.
 - Navigation to roster and arrangements.

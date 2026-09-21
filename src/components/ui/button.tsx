@@ -12,10 +12,13 @@ const buttonVariants = cva(
         default: "bg-sky-700 text-white hover:bg-sky-800",
         outline:
           "border border-slate-300 bg-white text-slate-900 hover:bg-slate-50",
+        destructive: "bg-rose-700 text-white hover:bg-rose-800",
+        ghost: "text-slate-700 hover:bg-slate-100",
       },
       size: {
         default: "h-10 px-4 py-2",
         lg: "h-11 px-8",
+        sm: "h-8 px-3 text-xs",
       },
     },
     defaultVariants: { variant: "default", size: "default" },

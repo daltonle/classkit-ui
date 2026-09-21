@@ -4,4 +4,6 @@ coverage
 .env
 .env.local
 .env.*.local
+client_secret*.json
+google-credential.json
 *.tsbuildinfo

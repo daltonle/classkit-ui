@@ -1,4 +1,7 @@
+import { Link } from "@tanstack/react-router";
 import { ArrowRight, LayoutGrid, ShieldCheck, WifiOff } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
 
 const benefits = [
   {
@@ -36,10 +39,12 @@ export function HomePage() {
             Classkit is a focused workspace for planning seating arrangements
             and managing the everyday details around your class.
           </p>
-          <div className="mt-8 inline-flex items-center gap-2 rounded-md bg-slate-200 px-4 py-2 text-sm font-medium text-slate-600">
-            Sign-in arrives after the foundation review
-            <ArrowRight aria-hidden="true" className="size-4" />
-          </div>
+          <Button asChild className="mt-8" size="lg">
+            <Link to="/classes">
+              Open your classes
+              <ArrowRight aria-hidden="true" className="size-4" />
+            </Link>
+          </Button>
         </div>
       </section>
       <section className="border-y border-slate-200 bg-white">
