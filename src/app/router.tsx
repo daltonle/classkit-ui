@@ -2,6 +2,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  createHashHistory,
   lazyRouteComponent,
   type RouterHistory,
 } from "@tanstack/react-router";
@@ -99,7 +100,9 @@ export function createAppRouter(history?: RouterHistory) {
   return createRouter({ routeTree, history });
 }
 
-export const router = createAppRouter();
+export const router = createAppRouter(
+  import.meta.env.BASE_URL === "/" ? undefined : createHashHistory(),
+);
 
 declare module "@tanstack/react-router" {
   interface Register {
